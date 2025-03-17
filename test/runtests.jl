@@ -27,7 +27,7 @@ end
     b = rand(100)
     x = zeros(100)
     # Solve
-    tol = 1e-9
+    tol = 1.0e-9
     # function set_debug_printlevel(amg, A, p)
     #     HYPRE.HYPRE_BoomerAMGSetPrintLevel(amg, 3)
     # end
@@ -38,8 +38,8 @@ end
     )
     prob = LinearProblem(A, b)
     solver = KrylovJL_CG(precs = bamg)
-    x = solve(prob, solver, atol=1.0e-14)
-    @test x ≈ A \ b atol=√tol
+    x = solve(prob, solver, atol = 1.0e-14)
+    @test x ≈ A \ b atol = √tol
 end
 
 
@@ -784,4 +784,3 @@ end
         @test r.exitcode == 0
     end
 end
-

@@ -5,7 +5,7 @@ end
 
 function LinearAlgebra.ldiv!(y::AbstractVector, prec::BoomerAMGPrecWrapper, x::AbstractVector)
     fill!(y, eltype(y)(0.0))
-    HYPRE.solve!(prec.P, y, prec.A, x)
+    return HYPRE.solve!(prec.P, y, prec.A, x)
 end
 
 """

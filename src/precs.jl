@@ -15,7 +15,7 @@ LinearSolve.jl compatible constructor for BoomerAMG preconditioners.
 Here `settings_fun(bamg::HYPRE.BoomerAMG, A::AbstractMatrix, p)` will be called on construction to
 allow users setting options directly in BoomerAMG via the internal interface. The `kwargs` will be
 passed into the BoomerAMG constructor.
-    
+
 ## Example
 
 ```julia

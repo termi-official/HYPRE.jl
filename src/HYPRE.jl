@@ -3,6 +3,7 @@
 module HYPRE
 
 using MPI: MPI
+import LinearAlgebra
 
 export HYPREMatrix, HYPREVector
 

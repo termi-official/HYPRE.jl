@@ -28,9 +28,9 @@ end
     x = zeros(100)
     # Solve
     tol = 1e-9
-    function set_debug_printlevel(amg, A, p)
-        HYPRE.HYPRE_BoomerAMGSetPrintLevel(amg, 3)
-    end
+    # function set_debug_printlevel(amg, A, p)
+    #     HYPRE.HYPRE_BoomerAMGSetPrintLevel(amg, 3)
+    # end
     bamg = HYPRE.BoomerAMGPrecBuilder(
         (amg, A, p) -> nothing;
         MaxIter = 1,
@@ -39,7 +39,7 @@ end
     prob = LinearProblem(A, b)
     solver = KrylovJL_CG(precs = bamg)
     x = solve(prob, solver, atol=1.0e-14)
-    @test x ≈ A \ b atol=tol
+    @test x ≈ A \ b atol=√tol
 end
 
 

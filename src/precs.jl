@@ -1,5 +1,3 @@
-import LinearAlgebra
-
 struct BoomerAMGPrecWrapper{MatType}
     P::HYPRE.BoomerAMG
     A::MatType
@@ -19,17 +17,13 @@ struct BoomerAMGPrecBuilder{SFun, Tk}
 end
 
 # Syntactic sugar wth some defaults
-function BoomerAMGPrecBuilder(settings_fun! = (amg, A, p) -> nothing; MaxIter = 1, Tol = 0.0, kwargs...)
-    return construct_boomeramg_prec_builder(settings_fun!; MaxIter, Tol, kwargs)
-end
-
-# Helper to package kwargs
-function construct_boomeramg_prec_builder(settings_fun!; kwargs...)
+function BoomerAMGPrecBuilder(settings_fun! = (amg, A, p) -> nothing; kwargs...)
     return BoomerAMGPrecBuilder(settings_fun!, kwargs)
 end
 
 function (b::BoomerAMGPrecBuilder)(A, p)
-    amg = HYPRE.BoomerAMG(; b.kwargs)
-    settings_fun!(amg, A, p)
-    return (BoomerAMGPrecWrapper(amg, A), I)
+    amg = HYPRE.BoomerAMG(; b.kwargs...)
+    Internals.set_precond_defaults(amg)
+    b.settings_fun!(amg, A, p)
+    return (BoomerAMGPrecWrapper(amg, A), LinearAlgebra.I)
 end

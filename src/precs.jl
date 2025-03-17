@@ -1,11 +1,11 @@
 struct BoomerAMGPrecWrapper{MatType}
-    P::HYPRE.BoomerAMG
+    P::BoomerAMG
     A::MatType
 end
 
 function LinearAlgebra.ldiv!(y::AbstractVector, prec::BoomerAMGPrecWrapper, x::AbstractVector)
     fill!(y, eltype(y)(0.0))
-    return HYPRE.solve!(prec.P, y, prec.A, x)
+    return solve!(prec.P, y, prec.A, x)
 end
 
 """
@@ -22,7 +22,7 @@ function BoomerAMGPrecBuilder(settings_fun! = (amg, A, p) -> nothing; kwargs...)
 end
 
 function (b::BoomerAMGPrecBuilder)(A, p)
-    amg = HYPRE.BoomerAMG(; b.kwargs...)
+    amg = BoomerAMG(; b.kwargs...)
     Internals.set_precond_defaults(amg)
     b.settings_fun!(amg, A, p)
     return (BoomerAMGPrecWrapper(amg, A), LinearAlgebra.I)

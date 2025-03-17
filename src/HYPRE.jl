@@ -5,7 +5,7 @@ module HYPRE
 using MPI: MPI
 using PartitionedArrays: IndexRange, MPIData, PSparseMatrix, PVector, PartitionedArrays,
     SequentialData, map_parts
-using SparseArrays: SparseArrays, SparseMatrixCSC, nnz, nonzeros, nzrange, rowvals
+using SparseArrays: SparseArrays, AbstractSparseMatrixCSC, SparseMatrixCSC, nnz, nonzeros, nzrange, rowvals
 using SparseMatricesCSR: SparseMatrixCSR, colvals, getrowptr
 
 export HYPREMatrix, HYPREVector
@@ -527,5 +527,8 @@ end
 # Solver interface
 include("solvers.jl")
 include("solver_options.jl")
+
+# LinearSolve preconditioner interface
+include("precs.jl")
 
 end # module HYPRE

@@ -28,7 +28,7 @@ function construct_boomeramg_prec_builder(settings_fun!; kwargs...)
     return BoomerAMGPrecBuilder(settings_fun!, kwargs)
 end
 
-function (b::BoomerAMGPrecBuilder)(A::AbstractSparseMatrixCSC, p)
+function (b::BoomerAMGPrecBuilder)(A, p)
     amg = HYPRE.BoomerAMG(; b.kwargs)
     settings_fun!(amg, A, p)
     return (BoomerAMGPrecWrapper(amg, A), I)

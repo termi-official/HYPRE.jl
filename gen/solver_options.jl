@@ -2,11 +2,10 @@ using HYPRE.LibHYPRE
 
 function generate_options(io, structname, prefixes...)
     println(io, "")
-    println(io, "function Internals.set_options(s::$(structname), kwargs)")
-    println(io, "    solver = s.solver")
+    println(io, "function Internals.set_options(solver::$(structname), kwargs)")
     println(io, "    for (k, v) in kwargs")
 
-    ns = Tuple{Symbol,String}[]
+    ns = Tuple{Symbol, String}[]
     for prefix in prefixes, n in names(LibHYPRE)
         r = Regex("^" * prefix * "([A-Z].*)\$")
         if (m = match(r, string(n)); m !== nothing)
@@ -29,7 +28,7 @@ function generate_options(io, structname, prefixes...)
         println(io)
         if k == "Precond"
             println(io, "            Internals.set_precond_defaults(v)")
-            println(io, "            Internals.set_precond(s, v)")
+            println(io, "            Internals.set_precond(solver, v)")
         elseif nargs == 1
             println(io, "            @check ", n, "(solver)")
         elseif nargs == 2
@@ -44,6 +43,7 @@ function generate_options(io, structname, prefixes...)
     println(io, "        end")
     println(io, "    end")
     println(io, "end")
+    return
 end
 
 open(joinpath(@__DIR__, "..", "src", "solver_options.jl"), "w") do io

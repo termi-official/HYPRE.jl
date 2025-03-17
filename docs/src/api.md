@@ -6,6 +6,14 @@
 HYPRE.Init
 ```
 
+## Matrix/vector creation
+
+```@docs
+HYPRE.start_assemble!
+HYPRE.assemble!
+HYPRE.finish_assemble!
+```
+
 ## Solvers and preconditioners
 
 ```@docs
@@ -23,4 +31,9 @@ HYPRE.Hybrid
 HYPRE.ILU
 HYPRE.PCG
 HYPRE.ParaSails
+```
+
+```@docs
+HYPRE.GetNumIterations
+HYPRE.GetFinalRelativeResidualNorm
 ```

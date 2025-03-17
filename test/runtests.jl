@@ -11,6 +11,8 @@ using SparseMatricesCSR
 using Test
 using LinearSolve
 
+include("test_utils.jl")
+
 # Init HYPRE and MPI
 HYPRE.Init()
 
@@ -52,11 +54,10 @@ end
 
 @testset "HYPREMatrix(::SparseMatrixCS(C|R))" begin
     ilower, iupper = 4, 6
-    CSC = convert(SparseMatrixCSC{HYPRE_Complex, HYPRE_Int}, sparse([
-        1 2 0 0 3
-        0 4 0 5 0
-        0 6 7 0 8
-    ]))
+    CSC = convert(
+        SparseMatrixCSC{HYPRE_Complex, HYPRE_Int},
+        sparse([1 2 0 0 3; 0 4 0 5 0; 0 6 7 0 8])
+    )
     CSR = sparsecsr(findnz(CSC)..., size(CSC)...)
     @test CSC == CSR
     csc = Internals.to_hypre_data(CSC, ilower, iupper)
@@ -73,8 +74,8 @@ end
     @test csr[5] == CSR.nzval
     @test_broken csr[5]::Vector{HYPRE_Complex} === CSR.nzval
 
-    @test_throws ArgumentError Internals.to_hypre_data(CSC, ilower, iupper-1)
-    @test_throws ArgumentError Internals.to_hypre_data(CSR, ilower, iupper+1)
+    @test_throws ArgumentError Internals.to_hypre_data(CSC, ilower, iupper - 1)
+    @test_throws ArgumentError Internals.to_hypre_data(CSR, ilower, iupper + 1)
 
     ilower, iupper = 6, 10
     CSC = sprand(5, 10, 0.3)
@@ -91,7 +92,7 @@ end
     H = HYPREMatrix(CSR, ilower, iupper)
     @test H.ijmatrix != HYPRE_IJMatrix(C_NULL)
     @test H.parmatrix != HYPRE_ParCSRMatrix(C_NULL)
-    H = HYPREMatrix(MPI.COMM_WORLD, CSR, ilower,  iupper)
+    H = HYPREMatrix(MPI.COMM_WORLD, CSR, ilower, iupper)
     @test H.ijmatrix != HYPRE_IJMatrix(C_NULL)
     @test H.parmatrix != HYPRE_ParCSRMatrix(C_NULL)
 
@@ -112,104 +113,97 @@ end
     @test H.iupper == H.jupper == 10
 end
 
-function tomain(x)
-    g = gather(copy(x))
-    be = get_backend(g.values)
-    if be isa SequentialBackend
-        return g.values.parts[1]
-    else # if be isa MPIBackend
-        return g.values.part
+function distribute_as_parray(parts, backend)
+    if backend == :debug
+        parts = DebugArray(parts)
+    elseif backend == :mpi
+        parts = distribute_with_mpi(parts)
+    else
+        @assert backend == :native
+        parts = collect(parts)
     end
+    return parts
 end
 
 @testset "HYPREMatrix(::PSparseMatrix)" begin
-    # Sequential backend
-    function diag_data(backend, parts)
-        is_seq = backend isa SequentialBackend
-        rows = PRange(parts, 10)
-        cols = PRange(parts, 10)
-        I, J, V = map_parts(parts) do p
+    function diag_data(parts)
+        rows = uniform_partition(parts, 10)
+        cols = uniform_partition(parts, 10)
+        np = length(parts)
+        IJV = map(parts) do p
             i = Int[]
             j = Int[]
             v = Float64[]
-            if (is_seq && p == 1) || !is_seq
+            if np == 1
+                # MPI case is special, we only have one MPI process.
+                @assert p == 1
+                append!(i, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+                append!(j, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+                append!(v, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+            elseif p == 1
+                @assert np == 2
                 append!(i, [1, 2, 3, 4, 5, 6])
                 append!(j, [1, 2, 3, 4, 5, 6])
                 append!(v, [1, 2, 3, 4, 5, 6])
-            end
-            if (is_seq && p == 2) || !is_seq
+            else
+                @assert np == 2
+                @assert p == 2
                 append!(i, [4, 5, 6, 7, 8, 9, 10])
                 append!(j, [4, 5, 6, 7, 8, 9, 10])
                 append!(v, [4, 5, 6, 7, 8, 9, 10])
             end
             return i, j, v
         end
-        add_gids!(rows, I)
-        assemble!(I, J, V, rows)
-        add_gids!(cols, J)
+        I, J, V = tuple_of_arrays(IJV)
         return I, J, V, rows, cols
     end
 
-    backend = SequentialBackend()
-    parts = get_part_ids(backend, 2)
-    CSC = PSparseMatrix(diag_data(backend, parts)...; ids=:global)
-    CSR = PSparseMatrix(sparsecsr, diag_data(backend, parts)...; ids=:global)
+    for backend in [:native, :debug, :mpi]
+        @testset "Backend=$backend" begin
+            if backend == :mpi
+                parts = 1:1
+            else
+                parts = 1:2
+            end
+            parts = distribute_as_parray(parts, backend)
+            CSC = psparse(diag_data(parts)...) |> fetch
+            CSR = psparse(sparsecsr, diag_data(parts)...) |> fetch
 
-    @test tomain(CSC) == tomain(CSR) ==
-        Diagonal([1, 2, 3, 8, 10, 12, 7, 8, 9, 10])
-
-    map_parts(CSC.values, CSC.rows.partition, CSC.cols.partition,
-              CSR.values, CSR.rows.partition, CSR.cols.partition, parts) do args...
-        cscvalues, cscrows, csccols, csrvalues, csrrows, csrcols, p = args
-        csc = Internals.to_hypre_data(cscvalues, cscrows, csccols)
-        csr = Internals.to_hypre_data(csrvalues, csrrows, csrcols)
-        if p == 1
-            nrows = 5
-            ncols = [1, 1, 1, 1, 1]
-            rows = [1, 2, 3, 4, 5]
-            cols = [1, 2, 3, 4, 5]
-            values = [1, 2, 3, 8, 10]
-        else # if p == 1
-            nrows = 5
-            ncols = [1, 1, 1, 1, 1]
-            rows = [6, 7, 8, 9, 10]
-            cols = [6, 7, 8, 9, 10]
-            values = [12, 7, 8, 9, 10]
+            for A in [CSC, CSR]
+                map(local_values(A), A.row_partition, A.col_partition, parts) do values, rows, cols, p
+                    hypre_data = Internals.to_hypre_data(values, rows, cols)
+                    if backend == :mpi
+                        @assert p == 1
+                        nrows = 10
+                        ncols = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+                        rows = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+                        cols = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+                        values = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+                    elseif p == 1
+                        nrows = 5
+                        ncols = [1, 1, 1, 1, 1]
+                        rows = [1, 2, 3, 4, 5]
+                        cols = [1, 2, 3, 4, 5]
+                        values = [1, 2, 3, 8, 10]
+                    else
+                        @assert p == 2
+                        nrows = 5
+                        ncols = [1, 1, 1, 1, 1]
+                        rows = [6, 7, 8, 9, 10]
+                        cols = [6, 7, 8, 9, 10]
+                        values = [12, 7, 8, 9, 10]
+                    end
+                    @test hypre_data[1]::HYPRE_Int == nrows
+                    @test hypre_data[2]::Vector{HYPRE_Int} == ncols
+                    @test hypre_data[3]::Vector{HYPRE_BigInt} == rows
+                    @test hypre_data[4]::Vector{HYPRE_BigInt} == cols
+                    @test hypre_data[5]::Vector{HYPRE_Complex} == values
+                end
+            end
         end
-        @test csc[1]::HYPRE_Int == csr[1]::HYPRE_Int == nrows
-        @test csc[2]::Vector{HYPRE_Int} == csr[2]::Vector{HYPRE_Int} == ncols
-        @test csc[3]::Vector{HYPRE_BigInt} == csr[3]::Vector{HYPRE_BigInt} == rows
-        @test csc[4]::Vector{HYPRE_BigInt} == csr[4]::Vector{HYPRE_BigInt} == cols
-        @test csc[5]::Vector{HYPRE_Complex} == csr[5]::Vector{HYPRE_Complex} == values
     end
-
-    # MPI backend
-    backend = MPIBackend()
-    parts = MPIData(1, MPI.COMM_WORLD, (1,)) # get_part_ids duplicates the comm
-    CSC = PSparseMatrix(diag_data(backend, parts)...; ids=:global)
-    CSR = PSparseMatrix(sparsecsr, diag_data(backend, parts)...; ids=:global)
-
-    @test tomain(CSC) == tomain(CSR) ==
-        Diagonal([1, 2, 3, 8, 10, 12, 7, 8, 9, 10])
-
-    map_parts(CSC.values, CSC.rows.partition, CSC.cols.partition,
-              CSR.values, CSR.rows.partition, CSR.cols.partition, parts) do args...
-        cscvalues, cscrows, csccols, csrvalues, csrrows, csrcols, p = args
-        csc = Internals.to_hypre_data(cscvalues, cscrows, csccols)
-        csr = Internals.to_hypre_data(csrvalues, csrrows, csrcols)
-        nrows = 10
-        ncols = fill(1, 10)
-        rows = collect(1:10)
-        cols = collect(1:10)
-        values = [1, 2, 3, 8, 10, 12, 7, 8, 9, 10]
-        @test csc[1]::HYPRE_Int == csr[1]::HYPRE_Int == nrows
-        @test csc[2]::Vector{HYPRE_Int} == csr[2]::Vector{HYPRE_Int} == ncols
-        @test csc[3]::Vector{HYPRE_BigInt} == csr[3]::Vector{HYPRE_BigInt} == rows
-        @test csc[4]::Vector{HYPRE_BigInt} == csr[4]::Vector{HYPRE_BigInt} == cols
-        @test csc[5]::Vector{HYPRE_Complex} == csr[5]::Vector{HYPRE_Complex} == values
-    end
-
 end
+
 
 @testset "HYPREVector" begin
     h = HYPREVector(MPI.COMM_WORLD, 1, 5)
@@ -271,52 +265,106 @@ end
 end
 
 @testset "HYPREVector(::PVector)" begin
-    # Sequential backend
-    backend = SequentialBackend()
-    parts = get_part_ids(backend, 2)
-    rows = PRange(parts, 10)
-    b = rand(10)
-    I, V = map_parts(parts) do p
-        if p == 1
-            return collect(1:6), b[1:6]
-        else # p == 2
-            return collect(4:10), b[4:10]
+    for backend in [:native, :debug, :mpi]
+        if backend == :mpi
+            parts = distribute_as_parray(1:1, backend)
+        else
+            parts = distribute_as_parray(1:2, backend)
         end
+        rows = uniform_partition(parts, 10)
+        b = rand(10)
+        IV = map(parts, rows) do p, owned
+            if backend == :mpi
+                row_indices = 1:10
+            elseif p == 1
+                row_indices = 1:6
+            else # p == 2
+                row_indices = 4:10
+            end
+            values = zeros(length(row_indices))
+            for (i, row) in enumerate(row_indices)
+                if row in owned
+                    values[i] = b[row]
+                end
+            end
+            return collect(row_indices), values
+        end
+        I, V = tuple_of_arrays(IV)
+        pb = pvector(I, V, rows) |> fetch
+        H = HYPREVector(pb)
+        # Check for valid vector
+        @test H.ijvector != HYPRE_IJVector(C_NULL)
+        @test H.parvector != HYPRE_ParVector(C_NULL)
+        # Copy back, check if identical
+        b_copy = copy!(similar(b), H)
+        @test b_copy == b
+        # Test copy to and from HYPREVector
+        pb2 = 2 * pb
+        H′ = copy!(H, pb2)
+        @test H === H′
+        pbc = similar(pb)
+        copy!(pbc, H)
+        @test pbc == 2 * pb
     end
-    add_gids!(rows, I)
-    pb = PVector(I, V, rows; ids=:global)
-    assemble!(pb)
-    @test tomain(pb) == [i in 4:6 ? 2x : x for (i, x) in zip(eachindex(b), b)]
-    H = HYPREVector(pb)
-    @test H.ijvector != HYPRE_IJVector(C_NULL)
-    @test H.parvector != HYPRE_ParVector(C_NULL)
-    pbc = fill!(copy(pb), 0)
-    copy!(pbc, H)
-    @test tomain(pbc) == tomain(pb)
+end
 
-    pb2 = 2 * pb
-    H′ = copy!(H, pb2)
-    @test H === H′
-    copy!(pbc, H)
-    @test tomain(pbc) == 2 * tomain(pb)
-
-    # MPI backend
-    backend = MPIBackend()
-    parts = get_part_ids(backend, 1)
-    rows = PRange(parts, 10)
-    I, V = map_parts(parts) do p
-        return collect(1:10), b
+@testset "HYPRE(Matrix|Vector)?Assembler" begin
+    comm = MPI.COMM_WORLD
+    # Assembly HYPREMatrix from ::Matrix
+    A = HYPREMatrix(comm, 1, 3)
+    AM = zeros(3, 3)
+    for i in 1:2
+        assembler = HYPRE.start_assemble!(A)
+        fill!(AM, 0)
+        for idx in ([1, 2], [3, 1])
+            a = rand(2, 2)
+            HYPRE.assemble!(assembler, idx, idx, a)
+            AM[idx, idx] += a
+            ar = rand(1, 2)
+            HYPRE.assemble!(assembler, [2], idx, ar)
+            AM[[2], idx] += ar
+        end
+        f = HYPRE.finish_assemble!(assembler)
+        @test f === A
+        @test getindex_debug(A, 1:3, 1:3) == AM
     end
-    add_gids!(rows, I)
-    pb = PVector(I, V, rows; ids=:global)
-    assemble!(pb)
-    @test tomain(pb) == b
-    H = HYPREVector(pb)
-    @test H.ijvector != HYPRE_IJVector(C_NULL)
-    @test H.parvector != HYPRE_ParVector(C_NULL)
-    pbc = fill!(copy(pb), 0)
-    copy!(pbc, H)
-    @test tomain(pbc) == tomain(pb)
+    # Assembly HYPREVector from ::Vector
+    b = HYPREVector(comm, 1, 3)
+    bv = zeros(3)
+    for i in 1:2
+        assembler = HYPRE.start_assemble!(b)
+        fill!(bv, 0)
+        for idx in ([1, 2], [3, 1])
+            c = rand(2)
+            HYPRE.assemble!(assembler, idx, c)
+            bv[idx] += c
+        end
+        f = HYPRE.finish_assemble!(assembler)
+        @test f === b
+        @test getindex_debug(b, 1:3) == bv
+    end
+    # Assembly HYPREMatrix/HYPREVector from ::Array
+    A = HYPREMatrix(comm, 1, 3)
+    AM = zeros(3, 3)
+    b = HYPREVector(comm, 1, 3)
+    bv = zeros(3)
+    for i in 1:2
+        assembler = HYPRE.start_assemble!(A, b)
+        fill!(AM, 0)
+        fill!(bv, 0)
+        for idx in ([1, 2], [3, 1])
+            a = rand(2, 2)
+            c = rand(2)
+            HYPRE.assemble!(assembler, idx, a, c)
+            AM[idx, idx] += a
+            bv[idx] += c
+        end
+        F, f = HYPRE.finish_assemble!(assembler)
+        @test F === A
+        @test f === b
+        @test getindex_debug(A, 1:3, 1:3) == AM
+        @test getindex_debug(b, 1:3) == bv
+    end
 end
 
 @testset "BiCGSTAB" begin
@@ -333,16 +381,19 @@ end
     b_h = HYPREVector(b)
     x_h = HYPREVector(x)
     # Solve
-    tol = 1e-9
+    tol = 1.0e-9
     bicg = HYPRE.BiCGSTAB(; Tol = tol)
     HYPRE.solve!(bicg, x_h, A_h, b_h)
     copy!(x, x_h)
     # Test result with direct solver
-    @test x ≈ A \ b atol=tol
+    @test x ≈ A \ b atol = tol
     # Test without passing initial guess
     x_h = HYPRE.solve(bicg, A_h, b_h)
     copy!(x, x_h)
-    @test x ≈ A \ b atol=tol
+    @test x ≈ A \ b atol = tol
+    # Test solver queries
+    @test HYPRE.GetFinalRelativeResidualNorm(bicg) < tol
+    @test HYPRE.GetNumIterations(bicg) > 0
 
     # Solve with preconditioner
     precond = HYPRE.BoomerAMG(; MaxIter = 1, Tol = 0.0)
@@ -351,11 +402,11 @@ end
     HYPRE.solve!(bicg, x_h, A_h, b_h)
     copy!(x, x_h)
     # Test result with direct solver
-    @test x ≈ A \ b atol=tol
+    @test x ≈ A \ b atol = tol
     # Test without passing initial guess
     x_h = HYPRE.solve(bicg, A_h, b_h)
     copy!(x, x_h)
-    @test x ≈ A \ b atol=tol
+    @test x ≈ A \ b atol = tol
     # Tests Internals.set_precond_defaults for BoomerAMG
     precond = HYPRE.BoomerAMG()
     bicg = HYPRE.BiCGSTAB(; Tol = tol, Precond = precond)
@@ -363,7 +414,7 @@ end
     HYPRE.solve!(bicg, x_h, A_h, b_h)
     copy!(x, x_h)
     # Test result with direct solver
-    @test x ≈ A \ b atol=tol
+    @test x ≈ A \ b atol = tol
 end
 
 @testset "BoomerAMG" begin
@@ -377,11 +428,11 @@ end
     for i in 1:99
         k = (1 + rand()) * [1.0 -1.0; -1.0 1.0]
         append!(V, k)
-        append!(I, [i, i+1, i, i+1]) # rows
-        append!(J, [i, i, i+1, i+1]) # cols
+        append!(I, [i, i + 1, i, i + 1]) # rows
+        append!(J, [i, i, i + 1, i + 1]) # cols
     end
     A = sparse(I, J, V)
-    A[:, 1] .= 0; A[1, :] .= 0; A[:, end] .= 0; A[end, :] .= 0;
+    A[:, 1] .= 0; A[1, :] .= 0; A[:, end] .= 0; A[end, :] .= 0
     A[1, 1] = 2; A[end, end] = 2
     @test isposdef(A)
     b = rand(100)
@@ -391,7 +442,7 @@ end
     b_h = HYPREVector(b, ilower, iupper)
     x_h = HYPREVector(b, ilower, iupper)
     # Solve
-    tol = 1e-9
+    tol = 1.0e-9
     amg = HYPRE.BoomerAMG(; Tol = tol)
     HYPRE.solve!(amg, x_h, A_h, b_h)
     copy!(x, x_h)
@@ -402,6 +453,9 @@ end
     x_h = HYPRE.solve(amg, A_h, b_h)
     copy!(x, x_h)
     @test x ≈ A \ b atol = tol * norm(b)
+    # Test solver queries
+    @test HYPRE.GetFinalRelativeResidualNorm(amg) < tol
+    @test HYPRE.GetNumIterations(amg) > 0
 end
 
 @testset "FlexGMRES" begin
@@ -418,16 +472,19 @@ end
     b_h = HYPREVector(b)
     x_h = HYPREVector(x)
     # Solve
-    tol = 1e-9
+    tol = 1.0e-9
     gmres = HYPRE.FlexGMRES(; Tol = tol)
     HYPRE.solve!(gmres, x_h, A_h, b_h)
     copy!(x, x_h)
     # Test result with direct solver
-    @test x ≈ A \ b atol=tol
+    @test x ≈ A \ b atol = tol
     # Test without passing initial guess
     x_h = HYPRE.solve(gmres, A_h, b_h)
     copy!(x, x_h)
-    @test x ≈ A \ b atol=tol
+    @test x ≈ A \ b atol = tol
+    # Test solver queries
+    @test HYPRE.GetFinalRelativeResidualNorm(gmres) < tol
+    @test HYPRE.GetNumIterations(gmres) > 0
 
     # Solve with preconditioner
     precond = HYPRE.BoomerAMG()
@@ -436,11 +493,11 @@ end
     HYPRE.solve!(gmres, x_h, A_h, b_h)
     copy!(x, x_h)
     # Test result with direct solver
-    @test x ≈ A \ b atol=tol
+    @test x ≈ A \ b atol = tol
     # Test without passing initial guess
     x_h = HYPRE.solve(gmres, A_h, b_h)
     copy!(x, x_h)
-    @test x ≈ A \ b atol=tol
+    @test x ≈ A \ b atol = tol
 end
 
 
@@ -458,16 +515,19 @@ end
     b_h = HYPREVector(b)
     x_h = HYPREVector(x)
     # Solve
-    tol = 1e-9
+    tol = 1.0e-9
     gmres = HYPRE.GMRES(; Tol = tol)
     HYPRE.solve!(gmres, x_h, A_h, b_h)
     copy!(x, x_h)
     # Test result with direct solver
-    @test x ≈ A \ b atol=tol
+    @test x ≈ A \ b atol = tol
     # Test without passing initial guess
     x_h = HYPRE.solve(gmres, A_h, b_h)
     copy!(x, x_h)
-    @test x ≈ A \ b atol=tol
+    @test x ≈ A \ b atol = tol
+    # Test solver queries
+    @test HYPRE.GetFinalRelativeResidualNorm(gmres) < tol
+    @test HYPRE.GetNumIterations(gmres) > 0
 
     # Solve with preconditioner
     precond = HYPRE.BoomerAMG(; MaxIter = 1, Tol = 0.0)
@@ -476,11 +536,11 @@ end
     HYPRE.solve!(gmres, x_h, A_h, b_h)
     copy!(x, x_h)
     # Test result with direct solver
-    @test x ≈ A \ b atol=tol
+    @test x ≈ A \ b atol = tol
     # Test without passing initial guess
     x_h = HYPRE.solve(gmres, A_h, b_h)
     copy!(x, x_h)
-    @test x ≈ A \ b atol=tol
+    @test x ≈ A \ b atol = tol
 end
 
 @testset "Hybrid" begin
@@ -497,16 +557,19 @@ end
     b_h = HYPREVector(b)
     x_h = HYPREVector(x)
     # Solve
-    tol = 1e-9
+    tol = 1.0e-9
     hybrid = HYPRE.Hybrid(; Tol = tol)
     HYPRE.solve!(hybrid, x_h, A_h, b_h)
     copy!(x, x_h)
     # Test result with direct solver
-    @test x ≈ A \ b atol=tol
+    @test x ≈ A \ b atol = tol
     # Test without passing initial guess
     x_h = HYPRE.solve(hybrid, A_h, b_h)
     copy!(x, x_h)
-    @test x ≈ A \ b atol=tol
+    @test x ≈ A \ b atol = tol
+    # Test solver queries
+    @test HYPRE.GetFinalRelativeResidualNorm(hybrid) < tol
+    @test HYPRE.GetNumIterations(hybrid) > 0
 
     # Solve with given preconditioner
     precond = HYPRE.BoomerAMG()
@@ -515,11 +578,11 @@ end
     HYPRE.solve!(hybrid, x_h, A_h, b_h)
     copy!(x, x_h)
     # Test result with direct solver
-    @test x ≈ A \ b atol=tol
+    @test x ≈ A \ b atol = tol
     # Test without passing initial guess
     x_h = HYPRE.solve(hybrid, A_h, b_h)
     copy!(x, x_h)
-    @test x ≈ A \ b atol=tol
+    @test x ≈ A \ b atol = tol
 end
 
 
@@ -537,16 +600,19 @@ end
     b_h = HYPREVector(b)
     x_h = HYPREVector(x)
     # Solve
-    tol = 1e-9
+    tol = 1.0e-9
     ilu = HYPRE.ILU(; Tol = tol)
     HYPRE.solve!(ilu, x_h, A_h, b_h)
     copy!(x, x_h)
     # Test result with direct solver
-    @test x ≈ A \ b atol=tol
+    @test x ≈ A \ b atol = tol
     # Test without passing initial guess
     x_h = HYPRE.solve(ilu, A_h, b_h)
     copy!(x, x_h)
-    @test x ≈ A \ b atol=tol
+    @test x ≈ A \ b atol = tol
+    # Test solver queries
+    @test HYPRE.GetFinalRelativeResidualNorm(ilu) < tol
+    @test HYPRE.GetNumIterations(ilu) > 0
 
     # Use as preconditioner to PCG
     precond = HYPRE.ILU()
@@ -555,11 +621,11 @@ end
     HYPRE.solve!(pcg, x_h, A_h, b_h)
     copy!(x, x_h)
     # Test result with direct solver
-    @test x ≈ A \ b atol=tol
+    @test x ≈ A \ b atol = tol
     # Test without passing initial guess
     x_h = HYPRE.solve(pcg, A_h, b_h)
     copy!(x, x_h)
-    @test x ≈ A \ b atol=tol
+    @test x ≈ A \ b atol = tol
 end
 
 
@@ -578,13 +644,16 @@ end
     b_h = HYPREVector(b, ilower, iupper)
     x_h = HYPREVector(b, ilower, iupper)
     # Solve with ParaSails as preconditioner
-    tol = 1e-9
+    tol = 1.0e-9
     parasails = HYPRE.ParaSails()
     pcg = HYPRE.PCG(; Tol = tol, Precond = parasails)
     HYPRE.solve!(pcg, x_h, A_h, b_h)
     copy!(x, x_h)
     # Test result with direct solver
-    @test x ≈ A \ b atol=tol
+    @test x ≈ A \ b atol = tol
+    # Test solver queries (should error)
+    @test_throws ArgumentError("cannot get residual norm for HYPRE.ParaSails") HYPRE.GetFinalRelativeResidualNorm(parasails)
+    @test_throws ArgumentError("cannot get number of iterations for HYPRE.ParaSails") HYPRE.GetNumIterations(parasails)
 end
 
 @testset "(ParCSR)PCG" begin
@@ -602,16 +671,20 @@ end
     b_h = HYPREVector(b, ilower, iupper)
     x_h = HYPREVector(b, ilower, iupper)
     # Solve
-    tol = 1e-9
+    tol = 1.0e-9
     pcg = HYPRE.PCG(; Tol = tol)
     HYPRE.solve!(pcg, x_h, A_h, b_h)
     copy!(x, x_h)
     # Test result with direct solver
-    @test x ≈ A \ b atol=tol
+    @test x ≈ A \ b atol = tol
     # Test without passing initial guess
     x_h = HYPRE.solve(pcg, A_h, b_h)
     copy!(x, x_h)
-    @test x ≈ A \ b atol=tol
+    @test x ≈ A \ b atol = tol
+    # Test solver queries
+    @test HYPRE.GetFinalRelativeResidualNorm(pcg) < tol
+    @test HYPRE.GetNumIterations(pcg) > 0
+
     # Solve with AMG preconditioner
     precond = HYPRE.BoomerAMG(; MaxIter = 1, Tol = 0.0)
     pcg = HYPRE.PCG(; Tol = tol, Precond = precond)
@@ -619,62 +692,96 @@ end
     HYPRE.solve!(pcg, x_h, A_h, b_h)
     copy!(x, x_h)
     # Test result with direct solver
-    @test x ≈ A \ b atol=tol
+    @test x ≈ A \ b atol = tol
     # Test without passing initial guess
     x_h = HYPRE.solve(pcg, A_h, b_h)
     copy!(x, x_h)
-    @test x ≈ A \ b atol=tol
+    @test x ≈ A \ b atol = tol
 end
 
-function topartitioned(x::Vector, A::SparseMatrixCSC, b::Vector)
-    parts = get_part_ids(SequentialBackend(), 1)
-    rows = PRange(parts, size(A, 1))
-    cols = PRange(parts, size(A, 2))
-    II, JJ, VV, bb, xx = map_parts(parts) do _
+function topartitioned(x::Vector, A::SparseMatrixCSC, b::Vector, backend)
+    parts = distribute_as_parray(1:1, backend)
+    n = size(A, 1)
+    rows = uniform_partition(parts, n)
+    cols = uniform_partition(parts, n)
+    tmp = map(parts) do _
         return findnz(A)..., b, x
     end
-    add_gids!(rows, II)
-    assemble!(II, JJ, VV, rows)
-    add_gids!(cols, JJ)
-    A_p = PSparseMatrix(II, JJ, VV, rows, cols; ids = :global)
+    II, JJ, VV, bb, xx = tuple_of_arrays(tmp)
+    A_p = psparse(II, JJ, VV, rows, cols) |> fetch
     b_p = PVector(bb, rows)
     x_p = PVector(xx, cols)
     return x_p, A_p, b_p
 end
 
 @testset "solve with PartitionedArrays" begin
-    # Setup
-    A = sprand(100, 100, 0.05); A = A'A + 5I
-    b = rand(100)
-    x = zeros(100)
-    x_p, A_p, b_p = topartitioned(x, A, b)
-    @test A == tomain(A_p)
-    @test b == tomain(b_p)
-    @test x == tomain(x_p)
-    # Solve
-    tol = 1e-9
-    pcg = HYPRE.PCG(; Tol = tol)
-    ## solve!
-    HYPRE.solve!(pcg, x_p, A_p, b_p)
-    @test tomain(x_p) ≈ A \ b atol=tol
-    ## solve
-    x_p = HYPRE.solve(pcg, A_p, b_p)
-    @test tomain(x_p) ≈ A \ b atol=tol
+    for backend in [:native, :debug, :mpi]
+        # Setup
+        A = sprand(100, 100, 0.05); A = A'A + 5I
+        b = rand(100)
+        x = zeros(100)
+        x_p, A_p, b_p = topartitioned(x, A, b, :native)
+        # Data is distributed over a single process. We can then check the following
+        # as local_values is the entire matrix/vector.
+        map(local_values(x_p)) do x_l
+            @test x_l == x
+        end
+        map(local_values(b_p)) do b_l
+            @test b_l == b
+        end
+        map(local_values(A_p)) do A_l
+            @test A_l == A
+        end
+
+        # Solve
+        tol = 1.0e-9
+        pcg = HYPRE.PCG(; Tol = tol)
+        ## solve!
+        HYPRE.solve!(pcg, x_p, A_p, b_p)
+        ref = A \ b
+        map(local_values(x_p)) do x
+            @test x ≈ ref atol = tol
+        end
+        ## solve
+        x_p = HYPRE.solve(pcg, A_p, b_p)
+        map(local_values(x_p)) do x
+            @test x ≈ ref atol = tol
+        end
+    end
 end
 
 @testset "solve with SparseMatrixCS(C|R)" begin
     # Setup
-    A = sprand(100, 100, 0.05); A = A'A + 5I
+    CSC = sprand(100, 100, 0.05); CSC = CSC'CSC + 5I
+    CSR = sparsecsr(findnz(CSC)..., size(CSC)...)
     b = rand(100)
-    x = zeros(100)
+    xcsc = zeros(100)
+    xcsr = zeros(100)
     # Solve
-    tol = 1e-9
+    tol = 1.0e-9
     pcg = HYPRE.PCG(; Tol = tol)
     ## solve!
-    HYPRE.solve!(pcg, x, A, b)
-    @test x ≈ A \ b atol=tol
+    HYPRE.solve!(pcg, xcsc, CSC, b)
+    @test xcsc ≈ CSC \ b atol = tol
+    HYPRE.solve!(pcg, xcsr, CSR, b)
+    @test xcsr ≈ CSC \ b atol = tol # TODO: CSR \ b fails
     ## solve
-    x = HYPRE.solve(pcg, A, b)
-    @test x ≈ A \ b atol=tol
+    xcsc = HYPRE.solve(pcg, CSC, b)
+    @test xcsc ≈ CSC \ b atol = tol
+    xcsr = HYPRE.solve(pcg, CSR, b)
+    @test xcsr ≈ CSC \ b atol = tol # TODO: CSR \ b fails
+end
+
+@testset "MPI execution" begin
+    testfiles = joinpath.(
+        @__DIR__,
+        [
+            "test_assembler.jl",
+        ]
+    )
+    for file in testfiles
+        r = run(ignorestatus(`$(mpiexec()) -n 2 $(Base.julia_cmd()) $(file)`))
+        @test r.exitcode == 0
+    end
 end
 

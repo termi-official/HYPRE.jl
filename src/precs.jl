@@ -9,7 +9,24 @@ function LinearAlgebra.ldiv!(y::AbstractVector, prec::BoomerAMGPrecWrapper, x::A
 end
 
 """
-    BoomerAMGPrecBuilder(settings_fun; kwargs...)
+    HYPRE.BoomerAMGPrecBuilder(settings_fun; kwargs...)
+
+LinearSolve.jl compatible constructor for BoomerAMG preconditioners.
+Here `settings_fun(bamg::HYPRE.BoomerAMG, A::AbstractMatrix, p)` will be called on construction to
+allow users setting options directly in BoomerAMG via the internal interface. The `kwargs` will be
+passed into the BoomerAMG constructor.
+    
+## Example
+
+```julia
+function set_debug_printlevel(bamg, A, p)
+    HYPRE.HYPRE_BoomerAMGSetPrintLevel(bamg, 3)
+end
+bamg = HYPRE.BoomerAMGPrecBuilder(
+    set_debug_printlevel;
+    Tol = 1e-9,
+)
+```
 """
 struct BoomerAMGPrecBuilder{SFun, Tk}
     settings_fun!::SFun
